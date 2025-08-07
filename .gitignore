@@ -1,2 +1,73 @@
 .DS_Store
 node_modules/
+
+# CI/CD
+*.env
+.env.*
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Xcode user-specific files
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+
+# Xcode build data
+DerivedData/
+build/
+*.xcarchive
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Fastlane artifacts (if used)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.bak
+*.orig
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+
+# Others
+*.moved-aside
+
+# Ignore Xcode workspace and user data
+*.xcworkspace
+xcuserdata/
+
+# Xcode automatic schemes (optional to ignore if not shared)
+xcshareddata/
+
+# SwiftPM Xcode integration files (redundant for most teams)
+.xcpackage/
+
+# Xcode Preview assets
+*.preview-thumbnails
+
+# Temporary project backups
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+
+# SwiftLint cache
+.swiftlint.yml
