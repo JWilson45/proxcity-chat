@@ -64,7 +64,37 @@ struct ContentView: View {
                 Text("📍 \(loc.coordinate.latitude), \(loc.coordinate.longitude)")
                     .font(.footnote)
             }
+
+            Text("🪵 Debug Log")
+                .font(.headline)
+                .padding(.top)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(socketService.logs.reversed(), id: \.self) { log in
+                        Text(log)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 200)
+            #if os(iOS)
+            .background(Color(UIColor.systemGray6))
+            #else
+            .background(Color.gray.opacity(0.2))
+            #endif
+            .cornerRadius(8)
+            .padding(.top)
         }
+            HStack {
+                Button("Clear Logs") {
+                    socketService.logs.removeAll()
+                }
+                // Add other control buttons here if desired
+            }
         .padding()
     }
 }

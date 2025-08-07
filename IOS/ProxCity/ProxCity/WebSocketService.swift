@@ -8,6 +8,18 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     let keyPair = KeyPairManager.shared
     // Discovered peers
     @Published var peers: [String] = []
+    // Debug logs
+    @Published var logs: [String] = []
+
+    /// Append a log message (max 100)
+    func log(_ message: String) {
+        DispatchQueue.main.async {
+            self.logs.append(message)
+            if self.logs.count > 100 {
+                self.logs.removeFirst()
+            }
+        }
+    }
     // WebRTC client for signaling
     var webRTCClient: WebRTCClient? {
         didSet {
@@ -25,6 +37,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                     ]
                 ]
                 print("📤 Auto-sending ICE:", candMsg)
+                self?.log("📤 Auto-sending ICE: \(candMsg)")
                 self?.send(data: candMsg)
             }
             webRTCClient?.onLocalDescription = { [weak self] localDesc in
@@ -36,6 +49,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                     "signal": ["type": "answer", "sdp": localDesc.sdp]
                 ]
                 print("📤 Auto-sending ANSWER:", answerMsg)
+                self.log("📤 Auto-sending ANSWER: \(answerMsg)")
                 self.send(data: answerMsg)
             }
         }
@@ -51,7 +65,9 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         socket = WebSocket(request: request)
         socket?.delegate = self
         print("📡 Attempting connection to: \(request.url!)")
+        self.log("📡 Attempting connection to: \(request.url!)")
         print("🧩 WebSocket delegate assigned")
+        self.log("🧩 WebSocket delegate assigned")
         socket?.connect()
     }
 
@@ -64,6 +80,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             }
         } catch {
             print("Failed to serialize message: \(error)")
+            self.log("Failed to serialize message: \(error)")
         }
     }
 
@@ -73,6 +90,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         switch event {
         case .connected(let headers):
             print("✅ Connected with headers: \(headers)")
+            self.log("✅ Connected with headers: \(headers)")
             let joinMsg: [String: Any] = [
                 "type": "JOIN",
                 "publicKey": keyPair.publicKey,
@@ -83,21 +101,26 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
 
         case .disconnected(let reason, let code):
             print("❌ Disconnected: \(reason) with code: \(code)")
+            self.log("❌ Disconnected: \(reason) with code: \(code)")
 
         case .text(let string):
             handleText(string)
 
         case .binary(let data):
             print("📦 Received binary data: \(data.count) bytes")
+            self.log("📦 Received binary data: \(data.count) bytes")
 
         case .error(let error):
             print("❗ Error: \(error?.localizedDescription ?? "Unknown error")")
+            self.log("❗ Error: \(error?.localizedDescription ?? "Unknown error")")
 
         case .cancelled:
             print("❌ Connection cancelled")
+            self.log("❌ Connection cancelled")
 
         default:
             print("🔄 Event: \(event)")
+            self.log("🔄 Event: \(event)")
         }
     }
 
@@ -106,6 +129,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let msgType = json["type"] as? String else {
             print("📨 Received text (unparsable): \(text)")
+            self.log("📨 Received text (unparsable): \(text)")
             return
         }
 
@@ -116,6 +140,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                !peers.contains(key) {
                 peers.append(key)
                 print("➕ New peer discovered: \(key)")
+                self.log("➕ New peer discovered: \(key)")
             }
 
         case "SIGNAL":
@@ -129,10 +154,12 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case "TRUST":
             if let to = json["to"] as? String, let sig = json["signature"] as? String {
                 print("Trust declaration from \(keyPair.publicKey) to \(to): \(sig)")
+                self.log("Trust declaration from \(keyPair.publicKey) to \(to): \(sig)")
             }
 
         default:
             print("📨 Received text: \(text)")
+            self.log("📨 Received text: \(text)")
         }
     }
 
@@ -140,22 +167,23 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         switch signalType {
         case "offer":
             webRTCClient?.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
+            self.log("⬅️ Received offer from \(fromKey)")
             webRTCClient?.answer()
             answeringTo = fromKey
-
             // Send answer using closure when localDescription is set
-            // Moved this closure to webRTCClient didSet to avoid multiple assignments
-
             // ICE candidates will be forwarded via delegate
 
         case "answer":
             webRTCClient?.set(remoteSdp: "answer", sdp: signal["sdp"] as! String)
+            self.log("⬅️ Received answer from \(fromKey)")
 
         case "candidate":
             webRTCClient?.add(iceCandidate: signal)
+            self.log("⬅️ Received ICE candidate from \(fromKey): \(signal)")
 
         default:
             print("⚠️ Unknown signal type: \(signalType)")
+            self.log("⚠️ Unknown signal type: \(signalType)")
         }
     }
 
