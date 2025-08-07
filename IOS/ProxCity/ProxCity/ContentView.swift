@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreLocation
+import Foundation
 
 struct ContentView: View {
     @StateObject var locationManager = LocationManager()
@@ -71,7 +72,7 @@ struct ContentView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(socketService.logs.reversed(), id: \.self) { log in
+                    ForEach(Array(socketService.logs.enumerated().reversed()), id: \.0) { index, log in
                         Text(log)
                             .font(.caption)
                             .foregroundColor(.gray)

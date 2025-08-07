@@ -5,7 +5,10 @@ import Foundation
 import WebRTC
 
 class WebRTCClient: NSObject {
-    private var peerConnection: RTCPeerConnection?
+    /// Callback invoked after setRemoteDescription completes
+    var onRemoteDescription: (() -> Void)?
+    
+    var rtcPeerConnection: RTCPeerConnection?
     private var factory: RTCPeerConnectionFactory
     private var audioTrack: RTCAudioTrack?
     var onIceCandidate: ((RTCIceCandidate) -> Void)?
@@ -20,6 +23,7 @@ class WebRTCClient: NSObject {
             try session.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
             try session.setMode(.voiceChat)
             try session.setActive(true)
+            print("🎤 AVAudioSession configured and activated")
         } catch {
             print("⚠️ Failed to configure AVAudioSession: \(error)")
         }
@@ -39,31 +43,48 @@ class WebRTCClient: NSObject {
         config.sdpSemantics = .unifiedPlan
 
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
-        peerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: self)
+        rtcPeerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: self)
 
         let audioSource = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
         audioTrack = factory.audioTrack(with: audioSource, trackId: "ARDAMSa0")
         if let track = audioTrack {
-            peerConnection?.add(track, streamIds: ["ARDAMS"])
+            rtcPeerConnection?.add(track, streamIds: ["ARDAMS"])
         }
     }
 
     func offer() {
+        print("📞 Starting offer process...")
         let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "true"], optionalConstraints: nil)
         print("➡️ WebRTCClient: Creating OFFER")
-        peerConnection?.offer(for: constraints) { [weak self] sdp, error in
+        // Ensure local audio track is added
+        if let audioTrack = self.createAudioTrack() {
+            self.rtcPeerConnection?.add(audioTrack, streamIds: ["ARDAMS"])
+            print("🎙️ Local audio track added")
+        }
+        rtcPeerConnection?.offer(for: constraints) { [weak self] sdp, error in
             guard let sdp = sdp else { return }
-            self?.peerConnection?.setLocalDescription(sdp, completionHandler: { _ in })
+            self?.rtcPeerConnection?.setLocalDescription(sdp, completionHandler: { _ in
+                self?.onLocalDescription?(sdp)
+            })
             self?.delegate?(["type": "offer", "sdp": sdp.sdp])
         }
     }
 
+    func createAudioTrack() -> RTCAudioTrack? {
+        let audioSource = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
+        let track = factory.audioTrack(with: audioSource, trackId: "ARDAMSa0")
+        return track
+    }
+
     func answer() {
+        print("📞 Starting answer process...")
         let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "true"], optionalConstraints: nil)
         print("⬅️ WebRTCClient: Creating ANSWER")
-        peerConnection?.answer(for: constraints) { [weak self] sdp, error in
+        rtcPeerConnection?.answer(for: constraints) { [weak self] sdp, error in
             guard let sdp = sdp else { return }
-            self?.peerConnection?.setLocalDescription(sdp, completionHandler: { _ in })
+            self?.rtcPeerConnection?.setLocalDescription(sdp, completionHandler: { _ in
+                self?.onLocalDescription?(sdp)
+            })
             self?.delegate?(["type": "answer", "sdp": sdp.sdp])
         }
     }
@@ -71,7 +92,14 @@ class WebRTCClient: NSObject {
     func set(remoteSdp type: String, sdp: String) {
         let sdpType: RTCSdpType = (type == "offer") ? .offer : .answer
         let sessionDescription = RTCSessionDescription(type: sdpType, sdp: sdp)
-        peerConnection?.setRemoteDescription(sessionDescription, completionHandler: { _ in })
+        rtcPeerConnection?.setRemoteDescription(sessionDescription, completionHandler: { [weak self] error in
+            if let error = error {
+                print("⚠️ Failed to set remote description: \(error)")
+            } else {
+                print("✅ Remote description applied")
+                self?.onRemoteDescription?()
+            }
+        })
         print("✅ WebRTCClient: set remote SDP of type \(type)")
     }
 
@@ -81,13 +109,26 @@ class WebRTCClient: NSObject {
               let sdpMid = iceCandidate["sdpMid"] as? String else { return }
 
         let candidate = RTCIceCandidate(sdp: sdp, sdpMLineIndex: sdpMLineIndex, sdpMid: sdpMid)
-        peerConnection?.add(candidate)
+        rtcPeerConnection?.add(candidate, completionHandler: { error in
+            if let error = error {
+                print("⚠️ Failed to add ICE candidate: \(error)")
+            } else {
+                print("✅ Successfully added ICE candidate")
+            }
+        })
     }
 }
 
 extension WebRTCClient: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
+        print("🔊 Received remote stream with \(stream.audioTracks.count) audio track(s)")
+        // Enable and play the first incoming audio track
+        if let remoteAudioTrack = stream.audioTracks.first {
+            remoteAudioTrack.isEnabled = true
+            print("🔊 Playing audio from remote track")
+        }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {

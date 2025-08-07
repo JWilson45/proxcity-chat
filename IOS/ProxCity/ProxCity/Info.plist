@@ -5,7 +5,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>This app connects with nearby users over the local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>This app captures your voice for proximity-based chat.</string>
+	<string>This app requires access to the microphone for voice chat.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

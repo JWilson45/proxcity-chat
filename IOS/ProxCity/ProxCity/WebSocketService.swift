@@ -4,6 +4,8 @@ import CoreLocation
 import WebRTC
 
 class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerConnectionDelegate {
+    // Buffer ICE candidates until remote SDP (answer) is applied
+    private var pendingCandidates: [[String: Any]] = []
     // User’s key pair for identity
     let keyPair = KeyPairManager.shared
     // Discovered peers
@@ -52,6 +54,15 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 self.log("📤 Auto-sending ANSWER: \(answerMsg)")
                 self.send(data: answerMsg)
             }
+            webRTCClient?.onRemoteDescription = { [weak self] in
+                guard let self = self else { return }
+                // Drain pending candidates
+                for candidate in self.pendingCandidates {
+                    self.webRTCClient?.add(iceCandidate: candidate)
+                    self.log("📍 Draining buffered ICE candidate: \(candidate)")
+                }
+                self.pendingCandidates.removeAll()
+            }
         }
     }
     // Underlying WebSocket
@@ -77,6 +88,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             let jsonData = try JSONSerialization.data(withJSONObject: data, options: [])
             if let jsonString = String(data: jsonData, encoding: .utf8) {
                 socket.write(string: jsonString)
+                self.log("📤 Sent WebSocket message: \(jsonString)")
             }
         } catch {
             print("Failed to serialize message: \(error)")
@@ -132,6 +144,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             self.log("📨 Received text (unparsable): \(text)")
             return
         }
+        self.log("📨 Parsed incoming message type: \(msgType)")
 
         switch msgType {
         case "JOIN":
@@ -164,6 +177,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     }
 
     private func handleSignal(type signalType: String, signal: [String: Any], fromKey: String) {
+        self.log("🧩 Handling signal type: \(signalType)")
         switch signalType {
         case "offer":
             webRTCClient?.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
@@ -174,12 +188,23 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             // ICE candidates will be forwarded via delegate
 
         case "answer":
-            webRTCClient?.set(remoteSdp: "answer", sdp: signal["sdp"] as! String)
+            if let sdp = signal["sdp"] as? String {
+                print("📥 Received answer SDP")
+                self.webRTCClient?.set(remoteSdp: "answer", sdp: sdp)
+            }
             self.log("⬅️ Received answer from \(fromKey)")
 
         case "candidate":
-            webRTCClient?.add(iceCandidate: signal)
-            self.log("⬅️ Received ICE candidate from \(fromKey): \(signal)")
+            // Buffer until remote description (answer) is applied
+            if let pc = webRTCClient?.rtcPeerConnection {
+                if pc.remoteDescription == nil {
+                    pendingCandidates.append(signal)
+                    self.log("⏳ Buffering ICE candidate until remote SDP: \(signal)")
+                } else {
+                    webRTCClient?.add(iceCandidate: signal)
+                    self.log("⬇️ Added ICE candidate immediately: \(signal)")
+                }
+            }
 
         default:
             print("⚠️ Unknown signal type: \(signalType)")
@@ -190,7 +215,12 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     // MARK: - RTCPeerConnectionDelegate
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
+        print("🔊 peerConnection didAdd stream with \(stream.audioTracks.count) audio track(s)")
+        if let remoteAudioTrack = stream.audioTracks.first {
+            print("🔊 Playing audio from remote track: \(remoteAudioTrack.trackId)")
+        }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
