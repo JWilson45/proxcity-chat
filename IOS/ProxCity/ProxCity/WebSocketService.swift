@@ -4,6 +4,8 @@ import CoreLocation
 import WebRTC
 
 class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerConnectionDelegate {
+    @Published var isSocketConnected: Bool = false
+    @Published var connectedPeer: String? = nil
     // Buffer ICE candidates until remote SDP (answer) is applied
     private var pendingCandidates: [[String: Any]] = []
     // User’s key pair for identity
@@ -96,6 +98,16 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         }
     }
 
+    func disconnect() {
+        socket?.disconnect()
+        isSocketConnected = false
+        peers.removeAll()
+        answeringTo = nil
+        logs.removeAll()
+        webRTCClient?.close()
+        log("🔌 Disconnected and cleared state")
+    }
+
     // MARK: - WebSocketDelegate
 
     func didReceive(event: WebSocketEvent, client: WebSocket) {
@@ -103,6 +115,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case .connected(let headers):
             print("✅ Connected with headers: \(headers)")
             self.log("✅ Connected with headers: \(headers)")
+            isSocketConnected = true
             let joinMsg: [String: Any] = [
                 "type": "JOIN",
                 "publicKey": keyPair.publicKey,
@@ -114,6 +127,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case .disconnected(let reason, let code):
             print("❌ Disconnected: \(reason) with code: \(code)")
             self.log("❌ Disconnected: \(reason) with code: \(code)")
+            isSocketConnected = false
 
         case .text(let string):
             handleText(string)
@@ -129,6 +143,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case .cancelled:
             print("❌ Connection cancelled")
             self.log("❌ Connection cancelled")
+            isSocketConnected = false
 
         default:
             print("🔄 Event: \(event)")
@@ -180,6 +195,9 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         self.log("🧩 Handling signal type: \(signalType)")
         switch signalType {
         case "offer":
+            DispatchQueue.main.async {
+                self.connectedPeer = fromKey
+            }
             webRTCClient?.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
             self.log("⬅️ Received offer from \(fromKey)")
             webRTCClient?.answer()
@@ -191,6 +209,9 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             if let sdp = signal["sdp"] as? String {
                 print("📥 Received answer SDP")
                 self.webRTCClient?.set(remoteSdp: "answer", sdp: sdp)
+            }
+            DispatchQueue.main.async {
+                self.connectedPeer = fromKey
             }
             self.log("⬅️ Received answer from \(fromKey)")
 

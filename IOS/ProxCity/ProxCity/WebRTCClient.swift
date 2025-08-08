@@ -3,8 +3,13 @@ import AVFoundation
 #endif
 import Foundation
 import WebRTC
+import Combine
 
-class WebRTCClient: NSObject {
+class WebRTCClient: NSObject, ObservableObject {
+    @Published var isConnected: Bool = false
+    @Published var isReceivingAudio: Bool = false
+    @Published var isSpeaking: Bool = false
+
     /// Callback invoked after setRemoteDescription completes
     var onRemoteDescription: (() -> Void)?
     
@@ -44,12 +49,7 @@ class WebRTCClient: NSObject {
 
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         rtcPeerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: self)
-
-        let audioSource = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
-        audioTrack = factory.audioTrack(with: audioSource, trackId: "ARDAMSa0")
-        if let track = audioTrack {
-            rtcPeerConnection?.add(track, streamIds: ["ARDAMS"])
-        }
+        // States start false, so no changes here
     }
 
     func offer() {
@@ -65,6 +65,9 @@ class WebRTCClient: NSObject {
             guard let sdp = sdp else { return }
             self?.rtcPeerConnection?.setLocalDescription(sdp, completionHandler: { _ in
                 self?.onLocalDescription?(sdp)
+                DispatchQueue.main.async {
+                    self?.isSpeaking = true
+                }
             })
             self?.delegate?(["type": "offer", "sdp": sdp.sdp])
         }
@@ -73,17 +76,28 @@ class WebRTCClient: NSObject {
     func createAudioTrack() -> RTCAudioTrack? {
         let audioSource = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
         let track = factory.audioTrack(with: audioSource, trackId: "ARDAMSa0")
+        track.isEnabled = false
+        // Keep a reference for push-to-talk control
+        self.audioTrack = track
         return track
     }
 
     func answer() {
         print("📞 Starting answer process...")
+        // Add local audio track so the answerer can send audio
+        if let audioTrack = self.createAudioTrack() {
+            self.rtcPeerConnection?.add(audioTrack, streamIds: ["ARDAMS"])
+            print("🎙️ Local audio track added for answerer")
+        }
         let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "true"], optionalConstraints: nil)
         print("⬅️ WebRTCClient: Creating ANSWER")
         rtcPeerConnection?.answer(for: constraints) { [weak self] sdp, error in
             guard let sdp = sdp else { return }
             self?.rtcPeerConnection?.setLocalDescription(sdp, completionHandler: { _ in
                 self?.onLocalDescription?(sdp)
+                DispatchQueue.main.async {
+                    self?.isSpeaking = true
+                }
             })
             self?.delegate?(["type": "answer", "sdp": sdp.sdp])
         }
@@ -117,6 +131,23 @@ class WebRTCClient: NSObject {
             }
         })
     }
+    
+    func close() {
+        rtcPeerConnection?.close()
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.isReceivingAudio = false
+            self.isSpeaking = false
+        }
+    }
+    
+    /// Enable or disable the local microphone (push-to-talk)
+    func setMicEnabled(_ enabled: Bool) {
+        DispatchQueue.main.async {
+            self.audioTrack?.isEnabled = enabled
+            self.isSpeaking = enabled
+        }
+    }
 }
 
 extension WebRTCClient: RTCPeerConnectionDelegate {
@@ -127,12 +158,17 @@ extension WebRTCClient: RTCPeerConnectionDelegate {
         if let remoteAudioTrack = stream.audioTracks.first {
             remoteAudioTrack.isEnabled = true
             print("🔊 Playing audio from remote track")
+            DispatchQueue.main.async {
+                self.isReceivingAudio = true
+            }
         }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        print("🌐 ICE connection state changed to: \(newState)")
+        DispatchQueue.main.async {
+            self.isConnected = (newState == .connected || newState == .completed)
+        }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
         print("🧩 ICE gathering state changed to: \(newState)")
