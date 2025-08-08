@@ -34,9 +34,22 @@
 		07770FA22E4415C30004EDB0 /* ProxCityUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ProxCityUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		07230C4B2E46444F00C8071F /* Exceptions for "ProxCity" folder in "ProxCity" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 07770F892E4415C20004EDB0 /* ProxCity */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		07770F8C2E4415C20004EDB0 /* ProxCity */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				07230C4B2E46444F00C8071F /* Exceptions for "ProxCity" folder in "ProxCity" target */,
+			);
 			path = ProxCity;
 			sourceTree = "<group>";
 		};

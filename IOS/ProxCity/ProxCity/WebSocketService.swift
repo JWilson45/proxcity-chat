@@ -27,6 +27,11 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     // WebRTC client for signaling
     var webRTCClient: WebRTCClient? {
         didSet {
+            setupWebRTCClientHandlers()
+        }
+    }
+    private func setupWebRTCClientHandlers() {
+        Task { @MainActor in
             webRTCClient?.onIceCandidate = { [weak self] candidate in
                 guard let toKey = self?.answeringTo else { return }
                 let candMsg: [String: Any] = [
@@ -99,12 +104,21 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     }
 
     func disconnect() {
+        // Notify server we are leaving
+        let leaveMsg: [String: Any] = [
+            "type": "LEAVE",
+            "publicKey": keyPair.publicKey
+        ]
+        send(data: leaveMsg)
         socket?.disconnect()
         isSocketConnected = false
-        peers.removeAll()
         answeringTo = nil
         logs.removeAll()
-        webRTCClient?.close()
+        Task { @MainActor in
+            webRTCClient?.close()
+        }
+        webRTCClient = nil // Reset client on disconnect
+        peers.removeAll()
         log("🔌 Disconnected and cleared state")
     }
 
@@ -179,6 +193,23 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             }
             handleSignal(type: signalType, signal: signal, fromKey: fromKey)
 
+        case "LEAVE":
+            if let key = json["publicKey"] as? String {
+                // Remove peer from list
+                DispatchQueue.main.async {
+                    self.peers.removeAll(where: { $0 == key })
+                    // If this was our connected peer, clear connection state
+                    if self.connectedPeer == key {
+                        self.connectedPeer = nil
+                        self.webRTCClient?.close()
+                        self.log("🔌 Peer \(key) left — connection closed")
+                    } else {
+                        self.log("➖ Peer left: \(key)")
+                    }
+                }
+                print("➖ Peer left: \(key)")
+            }
+
         case "TRUST":
             if let to = json["to"] as? String, let sig = json["signature"] as? String {
                 print("Trust declaration from \(keyPair.publicKey) to \(to): \(sig)")
@@ -192,15 +223,23 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     }
 
     private func handleSignal(type signalType: String, signal: [String: Any], fromKey: String) {
+        guard let webRTCClient = self.webRTCClient else {
+            self.log("⚠️ Signal received but WebRTCClient not ready.")
+            return
+        }
         self.log("🧩 Handling signal type: \(signalType)")
         switch signalType {
         case "offer":
             DispatchQueue.main.async {
                 self.connectedPeer = fromKey
             }
-            webRTCClient?.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
+            Task { @MainActor in
+                webRTCClient.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
+            }
             self.log("⬅️ Received offer from \(fromKey)")
-            webRTCClient?.answer()
+            Task { @MainActor in
+                webRTCClient.answer()
+            }
             answeringTo = fromKey
             // Send answer using closure when localDescription is set
             // ICE candidates will be forwarded via delegate
@@ -208,7 +247,9 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case "answer":
             if let sdp = signal["sdp"] as? String {
                 print("📥 Received answer SDP")
-                self.webRTCClient?.set(remoteSdp: "answer", sdp: sdp)
+                Task { @MainActor in
+                    webRTCClient.set(remoteSdp: "answer", sdp: sdp)
+                }
             }
             DispatchQueue.main.async {
                 self.connectedPeer = fromKey
@@ -217,12 +258,15 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
 
         case "candidate":
             // Buffer until remote description (answer) is applied
-            if let pc = webRTCClient?.rtcPeerConnection {
+            Task { @MainActor [weak self] in
+                guard let self = self, let pc = self.webRTCClient?.rtcPeerConnection else { return }
                 if pc.remoteDescription == nil {
-                    pendingCandidates.append(signal)
-                    self.log("⏳ Buffering ICE candidate until remote SDP: \(signal)")
+                    DispatchQueue.main.async {
+                        self.pendingCandidates.append(signal)
+                        self.log("⏳ Buffering ICE candidate until remote SDP: \(signal)")
+                    }
                 } else {
-                    webRTCClient?.add(iceCandidate: signal)
+                    self.webRTCClient?.add(iceCandidate: signal)
                     self.log("⬇️ Added ICE candidate immediately: \(signal)")
                 }
             }
@@ -244,7 +288,18 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        DispatchQueue.main.async {
+            switch newState {
+            case .disconnected, .failed, .closed:
+                self.connectedPeer = nil
+                self.webRTCClient?.close()
+                self.log("🔌 Connection dropped due to ICE state: \(newState)")
+            default:
+                break
+            }
+        }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {

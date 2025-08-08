@@ -1,11 +1,10 @@
-import SwiftUI
+    import SwiftUI
 import CoreLocation
 import Foundation
 
 struct ContentView: View {
     @StateObject var locationManager = LocationManager()
     @StateObject var socketService = WebSocketService()
-    @StateObject var webRTCClient = WebRTCClient()
     @State private var selectedPeer: String? = nil
 
     var body: some View {
@@ -17,9 +16,11 @@ struct ContentView: View {
                 if socketService.isSocketConnected {
                     socketService.disconnect()
                 } else {
-                    socketService.webRTCClient = webRTCClient
+                    let newClient = WebRTCClient()
+                    socketService.webRTCClient = newClient
+                    selectedPeer = nil
                     socketService.connect(location: locationManager.currentLocation)
-                    webRTCClient.delegate = { signal in
+                    socketService.webRTCClient?.delegate = { signal in
                         guard let from = (signal["from"] as? String) ?? selectedPeer else { return }
                         let msg: [String: Any] = [
                             "type": "SIGNAL",
@@ -35,8 +36,8 @@ struct ContentView: View {
 
             Button("Call Peer") {
                 // Prevent dialing the same peer when already connected
-                guard let target = selectedPeer, !webRTCClient.isConnected else { return }
-                webRTCClient.delegate = { signal in
+                guard let target = selectedPeer, !(socketService.webRTCClient?.isConnected ?? false) else { return }
+                socketService.webRTCClient?.delegate = { signal in
                     let msg: [String: Any] = [
                         "type": "SIGNAL",
                         "to": target,
@@ -46,9 +47,9 @@ struct ContentView: View {
                     print("📤 Sending SIGNAL:", msg)
                     socketService.send(data: msg)
                 }
-                webRTCClient.offer()
+                socketService.webRTCClient?.offer()
             }
-            .disabled(selectedPeer == nil || webRTCClient.isConnected)
+            .disabled(selectedPeer == nil || (socketService.webRTCClient?.isConnected ?? false))
 
             List(socketService.peers, id: \.self) { peer in
                 HStack {
@@ -74,11 +75,11 @@ struct ContentView: View {
             }
 
             HStack(spacing: 16) {
-                Circle().fill(webRTCClient.isReceivingAudio ? Color.red : Color.gray)
+                Circle().fill((socketService.webRTCClient?.isReceivingAudio ?? false) ? Color.red : Color.gray)
                     .frame(width: 16, height: 16)
                 Text("Receiving Audio")
                     .font(.caption)
-                Circle().fill(webRTCClient.isSpeaking ? Color.green : Color.gray)
+                Circle().fill((socketService.webRTCClient?.isSpeaking ?? false) ? Color.green : Color.gray)
                     .frame(width: 16, height: 16)
                 Text("Speaking")
                     .font(.caption)
@@ -89,15 +90,15 @@ struct ContentView: View {
             HStack {
                 Spacer()
                 Circle()
-                    .fill(webRTCClient.isSpeaking ? Color.green : Color.blue)
+                    .fill((socketService.webRTCClient?.isSpeaking ?? false) ? Color.green : Color.blue)
                     .frame(width: 80, height: 80)
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { _ in
-                                webRTCClient.setMicEnabled(true)
+                                socketService.webRTCClient?.setMicEnabled(true)
                             }
                             .onEnded { _ in
-                                webRTCClient.setMicEnabled(false)
+                                socketService.webRTCClient?.setMicEnabled(false)
                             }
                     )
                 Spacer()
