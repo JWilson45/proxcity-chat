@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreLocation
-import Foundation
 
 struct ContentView: View {
     @StateObject var locationManager = LocationManager()
