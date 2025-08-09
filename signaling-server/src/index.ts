@@ -47,21 +47,31 @@ const server = http.createServer((_, res) => {
 
 const wss = new WebSocketServer({ server });
 
-// Server-driven heartbeat to detect and reap dead sockets (e.g., app killed, network drop)
-const HEARTBEAT_INTERVAL_MS = 5000; // 5s
+// Server-driven heartbeat using timestamps so we can drop multiple dead sockets together
+const HEARTBEAT_INTERVAL_MS = 5000; // 5s ping cadence
+const DEAD_TIMEOUT_MS = 12000;      // consider dead if no pong for >12s
 const heartbeat = setInterval(() => {
+  const now = Date.now();
   for (const [sid, ws] of sessions.entries()) {
-    const alive = (ws as any).isAlive;
-    if (alive === false) {
-      const pk = keyBySession.get(sid);
-      // Terminate the dead socket and clean maps/broadcast LEAVE
+    const pk = keyBySession.get(sid);
+    const lastPongAt = (ws as any).lastPongAt ?? 0;
+    const lastPingAt = (ws as any).lastPingAt ?? 0;
+
+    // 1) Reap dead connections in this same tick if they exceeded timeout
+    if (now - lastPongAt > DEAD_TIMEOUT_MS) {
       try { ws.terminate(); } catch {}
       removeSession(sid, pk, { notify: true });
       console.log('💀 Terminated unresponsive session:', pk, `(${sid})`);
       continue;
     }
-    (ws as any).isAlive = false;
-    try { ws.ping(); } catch {}
+
+    // 2) Send ping if due
+    if (now - lastPingAt >= HEARTBEAT_INTERVAL_MS) {
+      try {
+        ws.ping();
+        (ws as any).lastPingAt = now;
+      } catch {}
+    }
   }
 }, HEARTBEAT_INTERVAL_MS);
 
@@ -69,9 +79,10 @@ wss.on('close', () => clearInterval(heartbeat));
 
 wss.on('connection', (ws: WebSocket) => {
   console.log('Client connected');
-  // Heartbeat: mark alive now and on every pong
-  (ws as any).isAlive = true;
-  ws.on('pong', () => { (ws as any).isAlive = true; });
+  // Heartbeat timestamps: record lastPongAt and lastPingAt
+  (ws as any).lastPongAt = Date.now();
+  (ws as any).lastPingAt = 0;
+  ws.on('pong', () => { (ws as any).lastPongAt = Date.now(); });
 
   ws.on('message', (raw: string) => {
     let data: any;
