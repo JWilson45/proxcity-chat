@@ -9,6 +9,24 @@ const keyBySession = new Map<string, string>();
 // publicKey -> set(sessionId)
 const sessionsByKey = new Map<string, Set<string>>();
 
+function removeSession(sessionId: string | undefined, publicKey?: string, opts: { notify?: boolean } = {}) {
+  const { notify = true } = opts;
+  if (!sessionId) return;
+  // Remove from primary maps
+  sessions.delete(sessionId);
+  keyBySession.delete(sessionId);
+  if (publicKey) {
+    const set = sessionsByKey.get(publicKey);
+    if (set) {
+      set.delete(sessionId);
+      if (set.size === 0) sessionsByKey.delete(publicKey);
+    }
+    if (notify) {
+      broadcastExceptPublicKey(publicKey, { type: 'LEAVE', publicKey, sessionId });
+    }
+  }
+}
+
 function send(ws: WebSocket, msg: any) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
@@ -29,8 +47,31 @@ const server = http.createServer((_, res) => {
 
 const wss = new WebSocketServer({ server });
 
+// Server-driven heartbeat to detect and reap dead sockets (e.g., app killed, network drop)
+const HEARTBEAT_INTERVAL_MS = 5000; // 5s
+const heartbeat = setInterval(() => {
+  for (const [sid, ws] of sessions.entries()) {
+    const alive = (ws as any).isAlive;
+    if (alive === false) {
+      const pk = keyBySession.get(sid);
+      // Terminate the dead socket and clean maps/broadcast LEAVE
+      try { ws.terminate(); } catch {}
+      removeSession(sid, pk, { notify: true });
+      console.log('💀 Terminated unresponsive session:', pk, `(${sid})`);
+      continue;
+    }
+    (ws as any).isAlive = false;
+    try { ws.ping(); } catch {}
+  }
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(heartbeat));
+
 wss.on('connection', (ws: WebSocket) => {
   console.log('Client connected');
+  // Heartbeat: mark alive now and on every pong
+  (ws as any).isAlive = true;
+  ws.on('pong', () => { (ws as any).isAlive = true; });
 
   ws.on('message', (raw: string) => {
     let data: any;
@@ -96,21 +137,11 @@ wss.on('connection', (ws: WebSocket) => {
       return;
     }
 
-    // LEAVE — remove only this socket’s session
     if (data.type === 'LEAVE') {
       const sid: string | undefined = (ws as any).sessionId;
       const pk: string | undefined = (ws as any).publicKey;
-      if (sid && pk) {
-        sessions.delete(sid);
-        keyBySession.delete(sid);
-        const set = sessionsByKey.get(pk);
-        if (set) {
-          set.delete(sid);
-          if (set.size === 0) sessionsByKey.delete(pk);
-        }
-        broadcastExceptPublicKey(pk, { type: 'LEAVE', publicKey: pk, sessionId: sid });
-        console.log(`User left via LEAVE: ${pk} (${sid})`);
-      }
+      removeSession(sid, pk, { notify: true });
+      console.log(`User left via LEAVE: ${pk} (${sid})`);
       return;
     }
 
@@ -124,16 +155,15 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', () => {
     const sid: string | undefined = (ws as any).sessionId;
     const pk: string | undefined = (ws as any).publicKey;
-    if (!sid || !pk) return;
-    sessions.delete(sid);
-    keyBySession.delete(sid);
-    const set = sessionsByKey.get(pk);
-    if (set) {
-      set.delete(sid);
-      if (set.size === 0) sessionsByKey.delete(pk);
-    }
-    broadcastExceptPublicKey(pk, { type: 'LEAVE', publicKey: pk, sessionId: sid });
+    removeSession(sid, pk, { notify: true });
     console.log('Client disconnected:', pk, `(${sid})`);
+  });
+
+  ws.on('error', (err) => {
+    const sid: string | undefined = (ws as any).sessionId;
+    const pk: string | undefined = (ws as any).publicKey;
+    console.error('WebSocket error for session', pk, `(${sid})`, err);
+    removeSession(sid, pk, { notify: true });
   });
 });
 
