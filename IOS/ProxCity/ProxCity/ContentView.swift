@@ -16,38 +16,17 @@ struct ContentView: View {
                 if socketService.isSocketConnected {
                     socketService.disconnect()
                 } else {
-                    let newClient = WebRTCClient()
-                    socketService.webRTCClient = newClient
                     selectedPeer = nil
                     socketService.connect(location: locationManager.currentLocation)
-                    socketService.webRTCClient?.delegate = { signal in
-                        guard let from = (signal["from"] as? String) ?? selectedPeer else { return }
-                        let msg: [String: Any] = [
-                            "type": "SIGNAL",
-                            "toPublicKey": from,
-                            "from": socketService.publicKey,
-                            "signal": signal
-                        ]
-                        print("📤 Sending SIGNAL:", msg)
-                        socketService.send(data: msg)
-                    }
                 }
             }
 
             Button("Call Peer") {
-                // Prevent dialing the same peer when already connected
-                guard let target = selectedPeer, !(selectedPeer.flatMap { socketService.connectedPeers.contains($0) } ?? false) else { return }
-                socketService.webRTCClient?.delegate = { signal in
-                    let msg: [String: Any] = [
-                        "type": "SIGNAL",
-                        "toPublicKey": target,
-                        "from": socketService.publicKey,
-                        "signal": signal
-                    ]
-                    print("📤 Sending SIGNAL:", msg)
-                    socketService.send(data: msg)
+                guard let target = selectedPeer,
+                    !(selectedPeer.flatMap { socketService.connectedPeers.contains($0) } ?? false) else { return }
+                Task { @MainActor in
+                    socketService.startCall(to: target)
                 }
-                socketService.webRTCClient?.offer()
             }
             .disabled(
                 selectedPeer == nil ||

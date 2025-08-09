@@ -116,12 +116,39 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             webRTCClient?.onSpeakingChanged = { [weak self] value in
                 DispatchQueue.main.async { self?.isSpeaking = value }
             }
+            // Forward SDP offers/answers produced by WebRTCClient
+            self.webRTCClient?.delegate = { [weak self] payload in
+                guard let self = self else { return }
+                guard let type = payload["type"] as? String else { return }
+                let toKey = self.answeringTo ?? ""
+                if toKey.isEmpty { self.log("⚠️ delegate payload has no target"); return }
+                let msg: [String: Any] = [
+                    "type": "SIGNAL",
+                    "toPublicKey": toKey,
+                    "from": self.keyPair.publicKey,
+                    "signal": payload
+                ]
+                self.log("📤 Sending \(type.uppercased()) to=\(toKey)")
+                self.send(data: msg)
+            }
         }
     }
     // Underlying WebSocket
     private var socket: WebSocket?
     // Store the peer we are answering to for ICE/answer sending
     private var answeringTo: String?
+    /// Start an outgoing call to a peer (fresh RTCPeerConnection and proper state)
+    @MainActor
+    func startCall(to targetKey: String) {
+        // Tear down any existing PC to avoid stale state
+        if let existing = self.webRTCClient { existing.close() }
+        // Create fresh client and bind handlers
+        self.webRTCClient = WebRTCClient()
+        self.answeringTo = targetKey
+        self.setupWebRTCClientHandlers()
+        self.log("📞 Outgoing call: preparing offer to \(targetKey)")
+        self.webRTCClient?.offer()
+    }
 
     func connect(location: CLLocation?) {
         var request = URLRequest(url: URL(string: "ws://192.168.1.188:3000")!)
@@ -270,18 +297,25 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 let signalType = signal["type"] as? String else { return }
             let fromKey = (json["from"] as? String) ?? (json["fromPublicKey"] as? String) ?? ""
             if fromKey.isEmpty { return }
-            handleSignal(type: signalType, signal: signal, fromKey: fromKey)
+            Task { @MainActor in
+                self.handleSignal(type: signalType, signal: signal, fromKey: fromKey)
+            }
 
         case "LEAVE":
             if let key = json["publicKey"] as? String {
-                // Remove peer from list
                 DispatchQueue.main.async {
                     self.peers.removeAll(where: { $0 == key })
-                    // If this was our connected peer, clear connection state
-                    if self.connectedPeers.contains(key) {
+                    if self.connectedPeers.contains(key) || self.answeringTo == key {
                         self.connectedPeers.remove(key)
-                        self.webRTCClient?.close()
-                        self.log("🔌 Peer \(key) left — connection closed")
+                        self.log("🔌 Peer \(key) left — tearing down connection")
+                        Task { @MainActor in
+                            self.webRTCClient?.close()
+                            self.webRTCClient = nil
+                        }
+                        self.answeringTo = nil
+                        self.pendingCandidates.removeAll()
+                        self.isReceivingAudio = false
+                        self.isSpeaking = false
                     } else {
                         self.log("➖ Peer left: \(key)")
                     }
@@ -302,8 +336,13 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 }
                 Task { @MainActor in
                     self.webRTCClient?.close()
+                    self.webRTCClient = nil
                 }
-                self.log("📴 Received HANGUP from \(from)")
+                self.answeringTo = nil
+                self.pendingCandidates.removeAll()
+                self.isReceivingAudio = false
+                self.isSpeaking = false
+                self.log("📴 Received HANGUP from \(from), tore down connection")
             }
 
         default:
@@ -312,49 +351,41 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         }
     }
 
+    @MainActor
     private func handleSignal(type signalType: String, signal: [String: Any], fromKey: String) {
-        guard let webRTCClient = self.webRTCClient else {
-            self.log("⚠️ Signal received but WebRTCClient not ready.")
-            return
-        }
         self.log("🧩 Handling signal type: \(signalType)")
         switch signalType {
         case "offer":
             self.answeringTo = fromKey
             Task { @MainActor in
-                webRTCClient.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
+                // Always start clean to avoid stale state on reconnect
+                if let existing = self.webRTCClient { existing.close() }
+                self.webRTCClient = WebRTCClient()
+                self.setupWebRTCClientHandlers()
+                self.pendingCandidates.removeAll()
+                self.webRTCClient?.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
+                self.log("⬅️ Received offer from \(fromKey); applied remote SDP and creating answer")
+                self.webRTCClient?.answer()
             }
-            self.log("⬅️ Received offer from \(fromKey)")
-            Task { @MainActor in
-                webRTCClient.answer()
-            }
-            answeringTo = fromKey
-            // Send answer using closure when localDescription is set
-            // ICE candidates will be forwarded via delegate
 
         case "answer":
             if let sdp = signal["sdp"] as? String {
                 print("📥 Received answer SDP")
-                Task { @MainActor in
-                    webRTCClient.set(remoteSdp: "answer", sdp: sdp)
-                }
+                self.webRTCClient?.set(remoteSdp: "answer", sdp: sdp)
+            } else {
+                self.log("⚠️ ANSWER missing SDP payload")
             }
-            answeringTo = fromKey
+            self.answeringTo = fromKey
             self.log("⬅️ Received answer from \(fromKey)")
 
         case "candidate":
-            // Buffer until remote description (answer) is applied
-            Task { @MainActor [weak self] in
-                guard let self = self, let pc = self.webRTCClient?.rtcPeerConnection else { return }
-                if pc.remoteDescription == nil {
-                    DispatchQueue.main.async {
-                        self.pendingCandidates.append(signal)
-                        self.log("⏳ Buffering ICE candidate until remote SDP: \(signal)")
-                    }
-                } else {
-                    self.webRTCClient?.add(iceCandidate: signal)
-                    self.log("⬇️ Added ICE candidate immediately: \(signal)")
-                }
+            // Buffer until remote description is applied (and even if client isn’t ready yet)
+            if (self.webRTCClient?.rtcPeerConnection?.remoteDescription) == nil {
+                self.pendingCandidates.append(signal)
+                self.log("⏳ Buffering ICE candidate until remote SDP/client ready: \(signal)")
+            } else {
+                self.webRTCClient?.add(iceCandidate: signal)
+                self.log("⬇️ Added ICE candidate immediately: \(signal)")
             }
 
         default:
