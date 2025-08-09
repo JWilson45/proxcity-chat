@@ -9,6 +9,24 @@ const keyBySession = new Map<string, string>();
 // publicKey -> set(sessionId)
 const sessionsByKey = new Map<string, Set<string>>();
 
+function removeSession(sessionId: string | undefined, publicKey?: string, opts: { notify?: boolean } = {}) {
+  const { notify = true } = opts;
+  if (!sessionId) return;
+  // Remove from primary maps
+  sessions.delete(sessionId);
+  keyBySession.delete(sessionId);
+  if (publicKey) {
+    const set = sessionsByKey.get(publicKey);
+    if (set) {
+      set.delete(sessionId);
+      if (set.size === 0) sessionsByKey.delete(publicKey);
+    }
+    if (notify) {
+      broadcastExceptPublicKey(publicKey, { type: 'LEAVE', publicKey, sessionId });
+    }
+  }
+}
+
 function send(ws: WebSocket, msg: any) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
@@ -29,8 +47,42 @@ const server = http.createServer((_, res) => {
 
 const wss = new WebSocketServer({ server });
 
+// Server-driven heartbeat using timestamps so we can drop multiple dead sockets together
+const HEARTBEAT_INTERVAL_MS = 5000; // 5s ping cadence
+const DEAD_TIMEOUT_MS = 12000;      // consider dead if no pong for >12s
+const heartbeat = setInterval(() => {
+  const now = Date.now();
+  for (const [sid, ws] of sessions.entries()) {
+    const pk = keyBySession.get(sid);
+    const lastPongAt = (ws as any).lastPongAt ?? 0;
+    const lastPingAt = (ws as any).lastPingAt ?? 0;
+
+    // 1) Reap dead connections in this same tick if they exceeded timeout
+    if (now - lastPongAt > DEAD_TIMEOUT_MS) {
+      try { ws.terminate(); } catch {}
+      removeSession(sid, pk, { notify: true });
+      console.log('💀 Terminated unresponsive session:', pk, `(${sid})`);
+      continue;
+    }
+
+    // 2) Send ping if due
+    if (now - lastPingAt >= HEARTBEAT_INTERVAL_MS) {
+      try {
+        ws.ping();
+        (ws as any).lastPingAt = now;
+      } catch {}
+    }
+  }
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(heartbeat));
+
 wss.on('connection', (ws: WebSocket) => {
   console.log('Client connected');
+  // Heartbeat timestamps: record lastPongAt and lastPingAt
+  (ws as any).lastPongAt = Date.now();
+  (ws as any).lastPingAt = 0;
+  ws.on('pong', () => { (ws as any).lastPongAt = Date.now(); });
 
   ws.on('message', (raw: string) => {
     let data: any;
@@ -96,21 +148,11 @@ wss.on('connection', (ws: WebSocket) => {
       return;
     }
 
-    // LEAVE — remove only this socket’s session
     if (data.type === 'LEAVE') {
       const sid: string | undefined = (ws as any).sessionId;
       const pk: string | undefined = (ws as any).publicKey;
-      if (sid && pk) {
-        sessions.delete(sid);
-        keyBySession.delete(sid);
-        const set = sessionsByKey.get(pk);
-        if (set) {
-          set.delete(sid);
-          if (set.size === 0) sessionsByKey.delete(pk);
-        }
-        broadcastExceptPublicKey(pk, { type: 'LEAVE', publicKey: pk, sessionId: sid });
-        console.log(`User left via LEAVE: ${pk} (${sid})`);
-      }
+      removeSession(sid, pk, { notify: true });
+      console.log(`User left via LEAVE: ${pk} (${sid})`);
       return;
     }
 
@@ -124,16 +166,15 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', () => {
     const sid: string | undefined = (ws as any).sessionId;
     const pk: string | undefined = (ws as any).publicKey;
-    if (!sid || !pk) return;
-    sessions.delete(sid);
-    keyBySession.delete(sid);
-    const set = sessionsByKey.get(pk);
-    if (set) {
-      set.delete(sid);
-      if (set.size === 0) sessionsByKey.delete(pk);
-    }
-    broadcastExceptPublicKey(pk, { type: 'LEAVE', publicKey: pk, sessionId: sid });
+    removeSession(sid, pk, { notify: true });
     console.log('Client disconnected:', pk, `(${sid})`);
+  });
+
+  ws.on('error', (err) => {
+    const sid: string | undefined = (ws as any).sessionId;
+    const pk: string | undefined = (ws as any).publicKey;
+    console.error('WebSocket error for session', pk, `(${sid})`, err);
+    removeSession(sid, pk, { notify: true });
   });
 });
 
