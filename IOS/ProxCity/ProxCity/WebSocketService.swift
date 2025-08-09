@@ -2,18 +2,38 @@ import Foundation
 import Starscream
 import CoreLocation
 import WebRTC
+import CryptoKit
+
+private struct KeyPair {
+    let privateKey: Curve25519.KeyAgreement.PrivateKey
+    let publicKey: String
+}
 
 class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerConnectionDelegate {
     @Published var isSocketConnected: Bool = false
-    @Published var connectedPeer: String? = nil
-    // Buffer ICE candidates until remote SDP (answer) is applied
-    private var pendingCandidates: [[String: Any]] = []
-    // User’s key pair for identity
-    let keyPair = KeyPairManager.shared
-    // Discovered peers
+    @Published var connectedPeers: Set<String> = []
     @Published var peers: [String] = []
-    // Debug logs
     @Published var logs: [String] = []
+    @Published var isReceivingAudio: Bool = false
+    @Published var isSpeaking: Bool = false
+
+    // Buffer ICE candidates that arrive before remoteDescription is set
+    private var pendingCandidates: [[String: Any]] = []
+
+    // Expose public key safely for UI without touching keyPair directly
+    var publicKey: String { keyPair.publicKey }
+
+    private let keyPair: KeyPair
+
+    override init() {
+        self.keyPair = WebSocketService.loadOrGenerateKeyPair()
+        super.init()
+        if ProcessInfo.processInfo.environment["EPHEMERAL_KEYS"] == "1" {
+            self.log("🔑 Using EPHEMERAL key for this session: \(self.keyPair.publicKey.prefix(24))…")
+        } else {
+            self.log("🔑 Using PERSISTENT key: \(self.keyPair.publicKey.prefix(24))…")
+        }
+    }
 
     /// Append a log message (max 100)
     func log(_ message: String) {
@@ -36,7 +56,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 guard let toKey = self?.answeringTo else { return }
                 let candMsg: [String: Any] = [
                     "type": "SIGNAL",
-                    "to": toKey,
+                    "toPublicKey": toKey,
                     "from": self?.keyPair.publicKey ?? "",
                     "signal": [
                         "type": "candidate",
@@ -53,7 +73,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 guard let self = self else { return }
                 let answerMsg: [String: Any] = [
                     "type": "SIGNAL",
-                    "to": self.answeringTo ?? "",
+                    "toPublicKey": self.answeringTo ?? "",
                     "from": self.keyPair.publicKey,
                     "signal": ["type": "answer", "sdp": localDesc.sdp]
                 ]
@@ -69,6 +89,32 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                     self.log("📍 Draining buffered ICE candidate: \(candidate)")
                 }
                 self.pendingCandidates.removeAll()
+            }
+            webRTCClient?.onICEConnectionStateChange = { [weak self] state in
+                guard let self = self else { return }
+                self.log("🌐 ICE state: \(state)")
+                switch state {
+                case .connected, .completed:
+                    if let key = self.answeringTo {
+                        DispatchQueue.main.async {
+                            self.connectedPeers.insert(key)
+                        }
+                    }
+                case .disconnected, .failed, .closed:
+                    if let key = self.answeringTo {
+                        DispatchQueue.main.async {
+                            self.connectedPeers.remove(key)
+                        }
+                    }
+                default:
+                    break
+                }
+            }
+            webRTCClient?.onReceivingChanged = { [weak self] value in
+                DispatchQueue.main.async { self?.isReceivingAudio = value }
+            }
+            webRTCClient?.onSpeakingChanged = { [weak self] value in
+                DispatchQueue.main.async { self?.isSpeaking = value }
             }
         }
     }
@@ -104,22 +150,35 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     }
 
     func disconnect() {
-        // Notify server we are leaving
         let leaveMsg: [String: Any] = [
             "type": "LEAVE",
             "publicKey": keyPair.publicKey
         ]
         send(data: leaveMsg)
+        if let to = answeringTo {
+            let bye: [String: Any] = [
+                "type": "HANGUP",
+                "from": keyPair.publicKey,
+                "toPublicKey": to
+            ]
+            send(data: bye)
+        }
         socket?.disconnect()
-        isSocketConnected = false
-        answeringTo = nil
-        logs.removeAll()
+        DispatchQueue.main.async {
+            self.isSocketConnected = false
+            self.connectedPeers.removeAll()
+            self.logs.removeAll()
+            self.peers.removeAll()
+            self.answeringTo = nil
+            self.isReceivingAudio = false
+            self.isSpeaking = false
+            self.pendingCandidates.removeAll()
+        }
         Task { @MainActor in
-            webRTCClient?.close()
+            self.webRTCClient?.close()
         }
         webRTCClient = nil // Reset client on disconnect
-        peers.removeAll()
-        log("🔌 Disconnected and cleared state")
+        self.log("🔌 Disconnected and cleared state")
     }
 
     // MARK: - WebSocketDelegate
@@ -129,7 +188,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case .connected(let headers):
             print("✅ Connected with headers: \(headers)")
             self.log("✅ Connected with headers: \(headers)")
-            isSocketConnected = true
+            DispatchQueue.main.async { self.isSocketConnected = true }
             let joinMsg: [String: Any] = [
                 "type": "JOIN",
                 "publicKey": keyPair.publicKey,
@@ -137,11 +196,17 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 "lng": 0.0
             ]
             send(data: joinMsg)
+            // Request roster after joining, slight delay to ensure JOIN is processed
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                let listReq: [String: Any] = ["type": "LIST"]
+                self.send(data: listReq)
+                self.log("📥 Requested peer list (LIST)")
+            }
 
         case .disconnected(let reason, let code):
             print("❌ Disconnected: \(reason) with code: \(code)")
             self.log("❌ Disconnected: \(reason) with code: \(code)")
-            isSocketConnected = false
+            DispatchQueue.main.async { self.isSocketConnected = false }
 
         case .text(let string):
             handleText(string)
@@ -157,7 +222,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         case .cancelled:
             print("❌ Connection cancelled")
             self.log("❌ Connection cancelled")
-            isSocketConnected = false
+            DispatchQueue.main.async { self.isSocketConnected = false }
 
         default:
             print("🔄 Event: \(event)")
@@ -178,19 +243,33 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         switch msgType {
         case "JOIN":
             if let key = json["publicKey"] as? String,
-               key != keyPair.publicKey,
-               !peers.contains(key) {
-                peers.append(key)
-                print("➕ New peer discovered: \(key)")
-                self.log("➕ New peer discovered: \(key)")
+               key != keyPair.publicKey {
+                DispatchQueue.main.async {
+                    if !self.peers.contains(key) {
+                        self.peers.append(key)
+                        print("➕ New peer discovered: \(key)")
+                        self.log("➕ New peer discovered: \(key)")
+                    }
+                }
+            }
+
+        case "LIST", "PEERS":
+            if let arr = json["peers"] as? [String] {
+                let filtered = arr.filter { $0 != self.keyPair.publicKey }
+                DispatchQueue.main.async {
+                    // replace the list with the server’s view to avoid stale entries
+                    self.peers = filtered
+                    self.log("📒 Updated peers from server list: \(filtered.count)")
+                }
+            } else {
+                self.log("⚠️ LIST/PEERS message missing 'peers' array: \(json)")
             }
 
         case "SIGNAL":
             guard let signal = json["signal"] as? [String: Any],
-                  let signalType = signal["type"] as? String,
-                  let fromKey = json["from"] as? String else {
-                return
-            }
+                let signalType = signal["type"] as? String else { return }
+            let fromKey = (json["from"] as? String) ?? (json["fromPublicKey"] as? String) ?? ""
+            if fromKey.isEmpty { return }
             handleSignal(type: signalType, signal: signal, fromKey: fromKey)
 
         case "LEAVE":
@@ -199,8 +278,8 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                 DispatchQueue.main.async {
                     self.peers.removeAll(where: { $0 == key })
                     // If this was our connected peer, clear connection state
-                    if self.connectedPeer == key {
-                        self.connectedPeer = nil
+                    if self.connectedPeers.contains(key) {
+                        self.connectedPeers.remove(key)
                         self.webRTCClient?.close()
                         self.log("🔌 Peer \(key) left — connection closed")
                     } else {
@@ -214,6 +293,17 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             if let to = json["to"] as? String, let sig = json["signature"] as? String {
                 print("Trust declaration from \(keyPair.publicKey) to \(to): \(sig)")
                 self.log("Trust declaration from \(keyPair.publicKey) to \(to): \(sig)")
+            }
+
+        case "HANGUP":
+            if let from = json["from"] as? String {
+                DispatchQueue.main.async {
+                    self.connectedPeers.remove(from)
+                }
+                Task { @MainActor in
+                    self.webRTCClient?.close()
+                }
+                self.log("📴 Received HANGUP from \(from)")
             }
 
         default:
@@ -230,9 +320,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         self.log("🧩 Handling signal type: \(signalType)")
         switch signalType {
         case "offer":
-            DispatchQueue.main.async {
-                self.connectedPeer = fromKey
-            }
+            self.answeringTo = fromKey
             Task { @MainActor in
                 webRTCClient.set(remoteSdp: "offer", sdp: signal["sdp"] as! String)
             }
@@ -251,9 +339,7 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
                     webRTCClient.set(remoteSdp: "answer", sdp: sdp)
                 }
             }
-            DispatchQueue.main.async {
-                self.connectedPeer = fromKey
-            }
+            answeringTo = fromKey
             self.log("⬅️ Received answer from \(fromKey)")
 
         case "candidate":
@@ -285,19 +371,15 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
         if let remoteAudioTrack = stream.audioTracks.first {
             print("🔊 Playing audio from remote track: \(remoteAudioTrack.trackId)")
         }
+        Task { @MainActor in
+            self.webRTCClient?.isReceivingAudio = true
+        }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        DispatchQueue.main.async {
-            switch newState {
-            case .disconnected, .failed, .closed:
-                self.connectedPeer = nil
-                self.webRTCClient?.close()
-                self.log("🔌 Connection dropped due to ICE state: \(newState)")
-            default:
-                break
-            }
+        Task { @MainActor in
+            self.webRTCClient?.onICEConnectionStateChange?(newState)
         }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
@@ -307,4 +389,26 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
+    private static func loadOrGenerateKeyPair() -> KeyPair {
+        // If EPHEMERAL_KEYS=1, generate a fresh, non-persisted key each run.
+        let useEphemeral = ProcessInfo.processInfo.environment["EPHEMERAL_KEYS"] == "1"
+        if useEphemeral {
+            let priv = Curve25519.KeyAgreement.PrivateKey()
+            let base = priv.publicKey.rawRepresentation.base64EncodedString()
+            // Return only the base key (no session suffix)
+            return KeyPair(privateKey: priv, publicKey: base)
+        }
+
+        // Persistent key (default path)
+        let keyTag = "webrtc.privateKey"
+        if let raw = UserDefaults.standard.data(forKey: keyTag),
+           let priv = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw) {
+            let pubB64 = priv.publicKey.rawRepresentation.base64EncodedString()
+            return KeyPair(privateKey: priv, publicKey: pubB64)
+        }
+        let priv = Curve25519.KeyAgreement.PrivateKey()
+        UserDefaults.standard.set(priv.rawRepresentation, forKey: keyTag)
+        let pubB64 = priv.publicKey.rawRepresentation.base64EncodedString()
+        return KeyPair(privateKey: priv, publicKey: pubB64)
+    }
 }

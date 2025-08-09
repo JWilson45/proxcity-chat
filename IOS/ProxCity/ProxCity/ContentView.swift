@@ -1,4 +1,4 @@
-    import SwiftUI
+import SwiftUI
 import CoreLocation
 import Foundation
 
@@ -24,8 +24,8 @@ struct ContentView: View {
                         guard let from = (signal["from"] as? String) ?? selectedPeer else { return }
                         let msg: [String: Any] = [
                             "type": "SIGNAL",
-                            "to": from,
-                            "from": socketService.keyPair.publicKey,
+                            "toPublicKey": from,
+                            "from": socketService.publicKey,
                             "signal": signal
                         ]
                         print("📤 Sending SIGNAL:", msg)
@@ -36,12 +36,12 @@ struct ContentView: View {
 
             Button("Call Peer") {
                 // Prevent dialing the same peer when already connected
-                guard let target = selectedPeer, !(socketService.webRTCClient?.isConnected ?? false) else { return }
+                guard let target = selectedPeer, !(selectedPeer.flatMap { socketService.connectedPeers.contains($0) } ?? false) else { return }
                 socketService.webRTCClient?.delegate = { signal in
                     let msg: [String: Any] = [
                         "type": "SIGNAL",
-                        "to": target,
-                        "from": socketService.keyPair.publicKey,
+                        "toPublicKey": target,
+                        "from": socketService.publicKey,
                         "signal": signal
                     ]
                     print("📤 Sending SIGNAL:", msg)
@@ -49,12 +49,15 @@ struct ContentView: View {
                 }
                 socketService.webRTCClient?.offer()
             }
-            .disabled(selectedPeer == nil || (socketService.webRTCClient?.isConnected ?? false))
+            .disabled(
+                selectedPeer == nil ||
+                (selectedPeer.flatMap { socketService.connectedPeers.contains($0) } ?? false)
+            )
 
             List(socketService.peers, id: \.self) { peer in
                 HStack {
                     Circle()
-                        .fill(socketService.connectedPeer == peer ? Color.green : Color.red)
+                        .fill(socketService.connectedPeers.contains(peer) ? Color.green : Color.red)
                         .frame(width: 12, height: 12)
                     Text(peer)
                     Spacer()
@@ -75,11 +78,11 @@ struct ContentView: View {
             }
 
             HStack(spacing: 16) {
-                Circle().fill((socketService.webRTCClient?.isReceivingAudio ?? false) ? Color.red : Color.gray)
+                Circle().fill(socketService.isReceivingAudio ? Color.red : Color.gray)
                     .frame(width: 16, height: 16)
                 Text("Receiving Audio")
                     .font(.caption)
-                Circle().fill((socketService.webRTCClient?.isSpeaking ?? false) ? Color.green : Color.gray)
+                Circle().fill(socketService.isSpeaking ? Color.green : Color.gray)
                     .frame(width: 16, height: 16)
                 Text("Speaking")
                     .font(.caption)
@@ -90,7 +93,7 @@ struct ContentView: View {
             HStack {
                 Spacer()
                 Circle()
-                    .fill((socketService.webRTCClient?.isSpeaking ?? false) ? Color.green : Color.blue)
+                    .fill(socketService.isSpeaking ? Color.green : Color.blue)
                     .frame(width: 80, height: 80)
                     .gesture(
                         DragGesture(minimumDistance: 0)

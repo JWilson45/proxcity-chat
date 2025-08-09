@@ -8,11 +8,18 @@ import Combine
 @MainActor
 class WebRTCClient: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
-    @Published var isReceivingAudio: Bool = false
-    @Published var isSpeaking: Bool = false
+    @Published var isReceivingAudio: Bool = false { didSet { onReceivingChanged?(isReceivingAudio) } }
+    @Published var isSpeaking: Bool = false { didSet { onSpeakingChanged?(isSpeaking) } }
+
+    // State change callbacks for UI mirroring in WebSocketService
+    var onReceivingChanged: ((Bool) -> Void)?
+    var onSpeakingChanged: ((Bool) -> Void)?
 
     /// Callback invoked after setRemoteDescription completes
     var onRemoteDescription: (() -> Void)?
+    
+    /// Callback when ICE connection state changes
+    var onICEConnectionStateChange: ((RTCIceConnectionState) -> Void)?
     
     public var rtcPeerConnection: RTCPeerConnection?
     private var factory: RTCPeerConnectionFactory
@@ -68,7 +75,7 @@ class WebRTCClient: NSObject, ObservableObject {
                 if let sdp = sdp {
                     try await rtcPeerConnection?.setLocalDescription(sdp)
                     self.onLocalDescription?(sdp)
-                    DispatchQueue.main.async {
+                    Task { @MainActor in
                         self.isSpeaking = true
                     }
                     self.delegate?(["type": "offer", "sdp": sdp.sdp])
@@ -96,7 +103,7 @@ class WebRTCClient: NSObject, ObservableObject {
                 if let sdp = try await rtcPeerConnection?.answer(for: constraints) {
                     try await rtcPeerConnection?.setLocalDescription(sdp)
                     self.onLocalDescription?(sdp)
-                    DispatchQueue.main.async {
+                    Task { @MainActor in
                         self.isSpeaking = true
                     }
                     self.delegate?(["type": "answer", "sdp": sdp.sdp])
@@ -142,7 +149,7 @@ class WebRTCClient: NSObject, ObservableObject {
         Task { @MainActor in
             rtcPeerConnection?.close()
         }
-        DispatchQueue.main.async {
+        Task { @MainActor in
             self.isConnected = false
             self.isReceivingAudio = false
             self.isSpeaking = false
@@ -151,15 +158,13 @@ class WebRTCClient: NSObject, ObservableObject {
     
     /// Enable or disable the local microphone (push-to-talk)
     func setMicEnabled(_ enabled: Bool) {
-        DispatchQueue.main.async {
-            if let track = self.audioTrack {
-                track.isEnabled = enabled
-                print("🎙️ Microphone \(enabled ? "ENABLED" : "DISABLED")")
-            } else {
-                print("⚠️ setMicEnabled called but audioTrack is nil")
-            }
-            self.isSpeaking = enabled
+        if let track = self.audioTrack {
+            track.isEnabled = enabled
+            print("🎙️ Microphone \(enabled ? "ENABLED" : "DISABLED")")
+        } else {
+            print("⚠️ setMicEnabled called but audioTrack is nil")
         }
+        self.isSpeaking = enabled
     }
 }
 
@@ -171,7 +176,7 @@ extension WebRTCClient: RTCPeerConnectionDelegate {
         if let remoteAudioTrack = stream.audioTracks.first {
             remoteAudioTrack.isEnabled = true
             print("🔊 Playing audio from remote track")
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 self.isReceivingAudio = true
             }
         }
@@ -179,8 +184,8 @@ extension WebRTCClient: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     nonisolated func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        DispatchQueue.main.async {
-            self.isConnected = (newState == .connected || newState == .completed)
+        Task { @MainActor in
+            self.onICEConnectionStateChange?(newState)
         }
     }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
