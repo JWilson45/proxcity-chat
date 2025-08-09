@@ -9,12 +9,17 @@ const keyBySession = new Map<string, string>();
 // publicKey -> set(sessionId)
 const sessionsByKey = new Map<string, Set<string>>();
 
-function removeSession(sessionId: string | undefined, publicKey?: string, opts: { notify?: boolean } = {}) {
+function removeSession(sessionId: string | undefined, opts: { notify?: boolean } = {}) {
   const { notify = true } = opts;
   if (!sessionId) return;
+
+  // Look up the public key before we delete the mapping
+  const publicKey = keyBySession.get(sessionId);
+
   // Remove from primary maps
   sessions.delete(sessionId);
   keyBySession.delete(sessionId);
+
   if (publicKey) {
     const set = sessionsByKey.get(publicKey);
     if (set) {
@@ -25,6 +30,10 @@ function removeSession(sessionId: string | undefined, publicKey?: string, opts: 
       broadcastExceptPublicKey(publicKey, { type: 'LEAVE', publicKey, sessionId });
     }
   }
+}
+
+function getUniquePeers(exclude?: string) {
+  return Array.from(sessionsByKey.keys()).filter(k => k !== exclude);
 }
 
 function send(ws: WebSocket, msg: any) {
@@ -60,7 +69,7 @@ const heartbeat = setInterval(() => {
     // 1) Reap dead connections in this same tick if they exceeded timeout
     if (now - lastPongAt > DEAD_TIMEOUT_MS) {
       try { ws.terminate(); } catch {}
-      removeSession(sid, pk, { notify: true });
+      removeSession(sid, { notify: true });
       console.log('💀 Terminated unresponsive session:', pk, `(${sid})`);
       continue;
     }
@@ -112,7 +121,7 @@ wss.on('connection', (ws: WebSocket) => {
       console.log(`User joined: ${publicKey} (session ${sessionId})`);
 
       // 1) Send roster of unique publicKeys to the joiner
-      const uniquePeers = Array.from(sessionsByKey.keys()).filter(k => k !== publicKey);
+      const uniquePeers = getUniquePeers(publicKey);
       send(ws, { type: 'PEERS', peers: uniquePeers });
 
       // 2) Broadcast JOIN (with sessionId) to everyone else
@@ -123,7 +132,7 @@ wss.on('connection', (ws: WebSocket) => {
     // LIST — reply with unique publicKeys
     if (data.type === 'LIST') {
       const me: string | undefined = (ws as any).publicKey;
-      const uniquePeers = Array.from(sessionsByKey.keys()).filter(k => k !== me);
+      const uniquePeers = getUniquePeers(me);
       send(ws, { type: 'PEERS', peers: uniquePeers });
       return;
     }
@@ -151,7 +160,7 @@ wss.on('connection', (ws: WebSocket) => {
     if (data.type === 'LEAVE') {
       const sid: string | undefined = (ws as any).sessionId;
       const pk: string | undefined = (ws as any).publicKey;
-      removeSession(sid, pk, { notify: true });
+      removeSession(sid, { notify: true });
       console.log(`User left via LEAVE: ${pk} (${sid})`);
       return;
     }
@@ -166,7 +175,7 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', () => {
     const sid: string | undefined = (ws as any).sessionId;
     const pk: string | undefined = (ws as any).publicKey;
-    removeSession(sid, pk, { notify: true });
+    removeSession(sid, { notify: true });
     console.log('Client disconnected:', pk, `(${sid})`);
   });
 
@@ -174,7 +183,7 @@ wss.on('connection', (ws: WebSocket) => {
     const sid: string | undefined = (ws as any).sessionId;
     const pk: string | undefined = (ws as any).publicKey;
     console.error('WebSocket error for session', pk, `(${sid})`, err);
-    removeSession(sid, pk, { notify: true });
+    removeSession(sid, { notify: true });
   });
 });
 
