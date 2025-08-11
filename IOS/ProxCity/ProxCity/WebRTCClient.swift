@@ -10,6 +10,7 @@ class WebRTCClient: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
     @Published var isReceivingAudio: Bool = false { didSet { onReceivingChanged?(isReceivingAudio) } }
     @Published var isSpeaking: Bool = false { didSet { onSpeakingChanged?(isSpeaking) } }
+    @Published var isUsingMainSpeaker: Bool = true { didSet { updateAudioRoute() } }
 
     // State change callbacks for UI mirroring in WebSocketService
     var onReceivingChanged: ((Bool) -> Void)?
@@ -165,6 +166,31 @@ class WebRTCClient: NSObject, ObservableObject {
             print("⚠️ setMicEnabled called but audioTrack is nil")
         }
         self.isSpeaking = enabled
+    }
+
+    /// Switch between main speaker and earpiece
+    func toggleSpeaker() {
+        isUsingMainSpeaker.toggle()
+    }
+    
+    /// Update the audio route based on the current speaker setting
+    func updateAudioRoute() {
+        #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        do {
+            if isUsingMainSpeaker {
+                try session.overrideOutputAudioPort(.speaker)
+                print("🔊 Switched to MAIN SPEAKER")
+            } else {
+                try session.overrideOutputAudioPort(.none)
+                print("🔊 Switched to EARPIECE")
+            }
+        } catch {
+            print("⚠️ Failed to switch audio route: \(error)")
+        }
+        #else
+        print("🔊 Speaker switching not available on this platform")
+        #endif
     }
 }
 

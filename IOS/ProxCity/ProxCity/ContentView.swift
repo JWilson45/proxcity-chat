@@ -64,6 +64,14 @@ struct ContentView: View {
                     .frame(width: 16, height: 16)
                 Text("Speaking")
                     .font(.caption)
+                HStack(spacing: 4) {
+                    Image(systemName: socketService.isUsingMainSpeaker ? "speaker.wave.2.fill" : "ear.fill")
+                        .foregroundColor(socketService.isUsingMainSpeaker ? .blue : .green)
+                        .font(.caption)
+                    Text(socketService.isUsingMainSpeaker ? "Main" : "Ear")
+                        .font(.caption)
+                        .foregroundColor(socketService.isUsingMainSpeaker ? .blue : .green)
+                }
                 Spacer()
             }
             .padding(.horizontal)
@@ -85,6 +93,38 @@ struct ContentView: View {
                 Spacer()
             }
             .padding(.vertical)
+            
+            // Speaker toggle button
+            HStack {
+                Spacer()
+                Button(action: {
+                    socketService.toggleSpeaker()
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: socketService.isUsingMainSpeaker ? "speaker.wave.3.fill" : "ear.fill")
+                            .foregroundColor(socketService.isUsingMainSpeaker ? .blue : .green)
+                            .font(.title2)
+                        Text(socketService.isUsingMainSpeaker ? "Main Speaker" : "Earpiece")
+                            .font(.caption)
+                            .foregroundColor(socketService.isUsingMainSpeaker ? .blue : .green)
+                            .fontWeight(.medium)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 25)
+                            .fill(socketService.isUsingMainSpeaker ? Color.blue.opacity(0.1) : Color.green.opacity(0.1))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 25)
+                                    .stroke(socketService.isUsingMainSpeaker ? Color.blue : Color.green, lineWidth: 2)
+                            )
+                    )
+                }
+                .scaleEffect(socketService.isUsingMainSpeaker ? 1.0 : 1.0)
+                .animation(.easeInOut(duration: 0.2), value: socketService.isUsingMainSpeaker)
+                Spacer()
+            }
+            .padding(.bottom)
 
             Text("🪵 Debug Log")
                 .font(.headline)

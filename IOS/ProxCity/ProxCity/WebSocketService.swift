@@ -3,6 +3,7 @@ import Starscream
 import CoreLocation
 import WebRTC
 import CryptoKit
+import Combine
 
 private struct KeyPair {
     let privateKey: Curve25519.KeyAgreement.PrivateKey
@@ -19,9 +20,23 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
 
     // Buffer ICE candidates that arrive before remoteDescription is set
     private var pendingCandidates: [[String: Any]] = []
+    private var cancellables = Set<AnyCancellable>()
 
     // Expose public key safely for UI without touching keyPair directly
     var publicKey: String { keyPair.publicKey }
+    
+    // Expose speaker switching functionality
+    @MainActor
+    var isUsingMainSpeaker: Bool {
+        get { webRTCClient?.isUsingMainSpeaker ?? true }
+        set { webRTCClient?.isUsingMainSpeaker = newValue }
+    }
+    
+    @MainActor
+    func toggleSpeaker() {
+        webRTCClient?.toggleSpeaker()
+        log("🔊 Speaker toggled to: \(isUsingMainSpeaker ? "Main Speaker" : "Earpiece")")
+    }
 
     private let keyPair: KeyPair
 
@@ -116,6 +131,12 @@ class WebSocketService: NSObject, ObservableObject, WebSocketDelegate, RTCPeerCo
             webRTCClient?.onSpeakingChanged = { [weak self] value in
                 DispatchQueue.main.async { self?.isSpeaking = value }
             }
+            // Forward speaker state changes
+            webRTCClient?.objectWillChange.sink { [weak self] in
+                DispatchQueue.main.async {
+                    self?.objectWillChange.send()
+                }
+            }.store(in: &cancellables)
             // Forward SDP offers/answers produced by WebRTCClient
             self.webRTCClient?.delegate = { [weak self] payload in
                 guard let self = self else { return }
